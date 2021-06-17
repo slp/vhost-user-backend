@@ -15,7 +15,7 @@ use std::result;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use vhost::vhost_user::message::{
-    VhostUserConfigFlags, VhostUserMemoryRegion, VhostUserProtocolFeatures,
+    VhostUserConfigFlags, VhostUserInflight, VhostUserMemoryRegion, VhostUserProtocolFeatures,
     VhostUserSingleMemoryRegion, VhostUserVirtioFeatures, VhostUserVringAddrFlags,
     VhostUserVringState,
 };
@@ -128,6 +128,21 @@ pub trait VhostUserBackend: Send + Sync + 'static {
 
     fn queues_per_thread(&self) -> Vec<u64> {
         vec![0xffff_ffff]
+    }
+
+    fn get_inflight_fd(
+        &self,
+        _inflight: &VhostUserInflight,
+    ) -> result::Result<(VhostUserInflight, RawFd), io::Error> {
+        Err(io::Error::new(io::ErrorKind::Other, "Unsupported feature"))
+    }
+
+    fn set_inflight_fd(
+        &self,
+        _inflight: &VhostUserInflight,
+        _file: File,
+    ) -> result::Result<(), io::Error> {
+        Err(io::Error::new(io::ErrorKind::Other, "Unsupported feature"))
     }
 }
 
@@ -951,6 +966,25 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             .retain(|mapping| mapping.gpa_base != region.guest_phys_addr);
 
         Ok(())
+    }
+
+    fn get_inflight_fd(
+        &mut self,
+        inflight: &VhostUserInflight,
+    ) -> VhostUserResult<(VhostUserInflight, RawFd)> {
+        self.backend
+            .write()
+            .unwrap()
+            .get_inflight_fd(inflight)
+            .map_err(|e| VhostUserError::ReqHandlerError(e))
+    }
+
+    fn set_inflight_fd(&mut self, inflight: &VhostUserInflight, file: File) -> VhostUserResult<()> {
+        self.backend
+            .write()
+            .unwrap()
+            .set_inflight_fd(inflight, file)
+            .map_err(|e| VhostUserError::ReqHandlerError(e))
     }
 }
 
