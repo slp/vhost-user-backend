@@ -770,11 +770,19 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             }
         }
 
+        self.vrings[index as usize].write().unwrap().call = None;
+
         let next_avail = self.vrings[index as usize]
             .read()
             .unwrap()
             .queue
             .next_avail();
+
+        self.vrings[index as usize]
+            .write()
+            .unwrap()
+            .mut_queue()
+            .reset();
 
         Ok(VhostUserVringState::new(index, u32::from(next_avail)))
     }
@@ -789,6 +797,21 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             let _ = unsafe { libc::close(kick.as_raw_fd()) };
         }
         self.vrings[index as usize].write().unwrap().kick =
+            fd.map(|x| unsafe { EventFd::from_raw_fd(x) });
+
+        Ok(())
+    }
+
+    fn set_vring_call(&mut self, index: u8, fd: Option<RawFd>) -> VhostUserResult<()> {
+        if index as usize >= self.num_queues {
+            return Err(VhostUserError::InvalidParam);
+        }
+
+        if let Some(call) = self.vrings[index as usize].write().unwrap().call.take() {
+            // Close file descriptor set by previous operations.
+            let _ = unsafe { libc::close(call.as_raw_fd()) };
+        }
+        self.vrings[index as usize].write().unwrap().call =
             fd.map(|x| unsafe { EventFd::from_raw_fd(x) });
 
         // Quote from vhost-user specification:
@@ -813,21 +836,6 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    fn set_vring_call(&mut self, index: u8, fd: Option<RawFd>) -> VhostUserResult<()> {
-        if index as usize >= self.num_queues {
-            return Err(VhostUserError::InvalidParam);
-        }
-
-        if let Some(call) = self.vrings[index as usize].write().unwrap().call.take() {
-            // Close file descriptor set by previous operations.
-            let _ = unsafe { libc::close(call.as_raw_fd()) };
-        }
-        self.vrings[index as usize].write().unwrap().call =
-            fd.map(|x| unsafe { EventFd::from_raw_fd(x) });
 
         Ok(())
     }
