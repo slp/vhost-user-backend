@@ -712,9 +712,11 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
         available: u64,
         _log: u64,
     ) -> VhostUserResult<()> {
-        if index as usize >= self.num_queues {
+        let mut vring_write = if index as usize >= self.num_queues {
             return Err(VhostUserError::InvalidParam);
-        }
+        } else {
+            self.vrings[index as usize].write().unwrap()
+        };
 
         if !self.mappings.is_empty() {
             let desc_table = self.vmm_va_to_gpa(descriptor).map_err(|e| {
@@ -726,17 +728,11 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             let used_ring = self.vmm_va_to_gpa(used).map_err(|e| {
                 VhostUserError::ReqHandlerError(io::Error::new(io::ErrorKind::Other, e))
             })?;
-            self.vrings[index as usize]
-                .write()
-                .unwrap()
-                .queue
-                .desc_table = GuestAddress(desc_table);
-            self.vrings[index as usize]
-                .write()
-                .unwrap()
-                .queue
-                .avail_ring = GuestAddress(avail_ring);
-            self.vrings[index as usize].write().unwrap().queue.used_ring = GuestAddress(used_ring);
+
+            vring_write.queue.desc_table = GuestAddress(desc_table);
+            vring_write.queue.avail_ring = GuestAddress(avail_ring);
+            vring_write.queue.used_ring = GuestAddress(used_ring);
+
             Ok(())
         } else {
             Err(VhostUserError::InvalidParam)
@@ -744,33 +740,35 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
     }
 
     fn set_vring_base(&mut self, index: u32, base: u32) -> VhostUserResult<()> {
-        self.vrings[index as usize]
-            .write()
-            .unwrap()
-            .queue
-            .set_next_avail(base as u16);
+        let mut vring_write = if index as usize >= self.num_queues {
+            return Err(VhostUserError::InvalidParam);
+        } else {
+            self.vrings[index as usize].write().unwrap()
+        };
+
+        vring_write.queue.set_next_avail(base as u16);
 
         let event_idx: bool = (self.acked_features & (1 << VIRTIO_RING_F_EVENT_IDX)) != 0;
-        self.vrings[index as usize]
-            .write()
-            .unwrap()
-            .mut_queue()
-            .set_event_idx(event_idx);
+        vring_write.mut_queue().set_event_idx(event_idx);
         self.backend.write().unwrap().set_event_idx(event_idx);
+
         Ok(())
     }
 
     fn get_vring_base(&mut self, index: u32) -> VhostUserResult<VhostUserVringState> {
-        if index as usize >= self.num_queues {
+        let mut vring_write = if index as usize >= self.num_queues {
             return Err(VhostUserError::InvalidParam);
-        }
+        } else {
+            self.vrings[index as usize].write().unwrap()
+        };
+
         // Quote from vhost-user specification:
         // Client must start ring upon receiving a kick (that is, detecting
         // that file descriptor is readable) on the descriptor specified by
         // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
         // VHOST_USER_GET_VRING_BASE.
-        self.vrings[index as usize].write().unwrap().queue.ready = false;
-        if let Some(fd) = self.vrings[index as usize].write().unwrap().kick.take() {
+        vring_write.queue.ready = false;
+        if let Some(fd) = vring_write.kick.take() {
             for (thread_index, queues_mask) in self.queues_per_thread.iter().enumerate() {
                 let shifted_queues_mask = queues_mask >> index;
                 if shifted_queues_mask & 1u64 == 1u64 {
@@ -787,18 +785,14 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             }
         }
 
-        self.vrings[index as usize].write().unwrap().call = None;
+        vring_write.call = None;
 
         // Strictly speaking, we should do this upon receiving the first kick,
         // but it's actually easier to just do it here so we're ready in case
         // the vring gets re-initialized by the guest.
-        self.vrings[index as usize].write().unwrap().queue.reset();
+        vring_write.queue.reset();
 
-        let next_avail = self.vrings[index as usize]
-            .read()
-            .unwrap()
-            .queue
-            .next_avail();
+        let next_avail = vring_write.queue.next_avail();
 
         Ok(VhostUserVringState::new(index, u32::from(next_avail)))
     }
