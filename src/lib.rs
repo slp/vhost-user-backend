@@ -789,6 +789,11 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
 
         self.vrings[index as usize].write().unwrap().call = None;
 
+        // Strictly speaking, we should do this upon receiving the first kick,
+        // but it's actually easier to just do it here so we're ready in case
+        // the vring gets re-initialized by the guest.
+        self.vrings[index as usize].write().unwrap().queue.reset();
+
         let next_avail = self.vrings[index as usize]
             .read()
             .unwrap()
