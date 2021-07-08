@@ -552,6 +552,38 @@ impl<S: VhostUserBackend> VhostUserHandler<S> {
 
         Err(VhostUserHandlerError::MissingMemoryMapping)
     }
+
+    fn vring_needs_init(&self, vring: &Arc<RwLock<Vring>>) -> bool {
+        let vring_read = vring.read().unwrap();
+
+        // If the vring wasn't initialized and we already have an EventFd for
+        // both VRING_KICK and VRING_CALL, initialize it now.
+        !vring_read.queue.ready && vring_read.call.is_some() && vring_read.kick.is_some()
+    }
+
+    fn initialize_vring(&self, vring: &Arc<RwLock<Vring>>, index: u8) -> VhostUserResult<()> {
+        let mut vring_write = vring.write().unwrap();
+
+        assert!(vring_write.call.is_some());
+        assert!(vring_write.kick.is_some());
+
+        let kick_fd = vring_write.kick.as_ref().unwrap().as_raw_fd();
+
+        for (thread_index, queues_mask) in self.queues_per_thread.iter().enumerate() {
+            let shifted_queues_mask = queues_mask >> index;
+            if shifted_queues_mask & 1u64 == 1u64 {
+                let evt_idx = queues_mask.count_ones() - shifted_queues_mask.count_ones();
+                self.workers[thread_index]
+                    .register_listener(kick_fd, epoll::Events::EPOLLIN, u64::from(evt_idx))
+                    .map_err(VhostUserError::ReqHandlerError)?;
+                break;
+            }
+        }
+
+        vring_write.queue.ready = true;
+
+        Ok(())
+    }
 }
 
 impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
@@ -738,7 +770,7 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
         // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
         // VHOST_USER_GET_VRING_BASE.
         self.vrings[index as usize].write().unwrap().queue.ready = false;
-        if let Some(fd) = self.vrings[index as usize].read().unwrap().kick.as_ref() {
+        if let Some(fd) = self.vrings[index as usize].write().unwrap().kick.take() {
             for (thread_index, queues_mask) in self.queues_per_thread.iter().enumerate() {
                 let shifted_queues_mask = queues_mask >> index;
                 if shifted_queues_mask & 1u64 == 1u64 {
@@ -755,6 +787,8 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
             }
         }
 
+        self.vrings[index as usize].write().unwrap().call = None;
+
         let next_avail = self.vrings[index as usize]
             .read()
             .unwrap()
@@ -765,51 +799,40 @@ impl<S: VhostUserBackend> VhostUserSlaveReqHandlerMut for VhostUserHandler<S> {
     }
 
     fn set_vring_kick(&mut self, index: u8, file: Option<File>) -> VhostUserResult<()> {
-        if index as usize >= self.num_queues {
+        let vring = if index as usize >= self.num_queues {
             return Err(VhostUserError::InvalidParam);
-        }
+        } else {
+            &self.vrings[index as usize]
+        };
 
         // SAFETY: EventFd requires that it has sole ownership of its fd. So
         // does File, so this is safe.
         // Ideally, we'd have a generic way to refer to a uniquely-owned fd,
         // such as that proposed by Rust RFC #3128.
-        self.vrings[index as usize].write().unwrap().kick =
+        vring.write().unwrap().kick =
             file.map(|f| unsafe { EventFd::from_raw_fd(f.into_raw_fd()) });
 
-        // Quote from vhost-user specification:
-        // Client must start ring upon receiving a kick (that is, detecting
-        // that file descriptor is readable) on the descriptor specified by
-        // VHOST_USER_SET_VRING_KICK, and stop ring upon receiving
-        // VHOST_USER_GET_VRING_BASE.
-        self.vrings[index as usize].write().unwrap().queue.ready = true;
-        if let Some(fd) = self.vrings[index as usize].read().unwrap().kick.as_ref() {
-            for (thread_index, queues_mask) in self.queues_per_thread.iter().enumerate() {
-                let shifted_queues_mask = queues_mask >> index;
-                if shifted_queues_mask & 1u64 == 1u64 {
-                    let evt_idx = queues_mask.count_ones() - shifted_queues_mask.count_ones();
-                    self.workers[thread_index]
-                        .register_listener(
-                            fd.as_raw_fd(),
-                            epoll::Events::EPOLLIN,
-                            u64::from(evt_idx),
-                        )
-                        .map_err(VhostUserError::ReqHandlerError)?;
-                    break;
-                }
-            }
+        if self.vring_needs_init(&vring) {
+            self.initialize_vring(&vring, index)?;
         }
 
         Ok(())
     }
 
     fn set_vring_call(&mut self, index: u8, file: Option<File>) -> VhostUserResult<()> {
-        if index as usize >= self.num_queues {
+        let vring = if index as usize >= self.num_queues {
             return Err(VhostUserError::InvalidParam);
-        }
+        } else {
+            &self.vrings[index as usize]
+        };
 
         // SAFETY: see comment in set_vring_kick()
-        self.vrings[index as usize].write().unwrap().call =
+        vring.write().unwrap().call =
             file.map(|f| unsafe { EventFd::from_raw_fd(f.into_raw_fd()) });
+
+        if self.vring_needs_init(&vring) {
+            self.initialize_vring(&vring, index)?;
+        }
 
         Ok(())
     }
